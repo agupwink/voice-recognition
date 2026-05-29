@@ -18,6 +18,23 @@ class Settings:
     # Noise
     SNR_THRESHOLD_DB: float = 3.0
 
+    # Feature flags
+    ENABLE_VAD: bool = True
+    ENABLE_NOISE_DETECTION: bool = True
+    ENABLE_PHRASE_VALIDATION: bool = True
+
+    # VAD
+    VAD_THRESHOLD: float = 0.5
+    MAX_RECORDING_SECONDS: int = 8
+    SILENCE_TIMEOUT_MS: int = 1500
+
+    # Audio quality
+    MIN_RMS_ENERGY: float = 0.002
+    CLIPPING_THRESHOLD: float = 0.95
+
+    # Phrase validation
+    PHRASE_SIMILARITY_THRESHOLD: float = 0.50
+
     # ASR
     WHISPER_MODEL: str = "base"
     WHISPER_LANGUAGE: str = "en"

@@ -29,8 +29,12 @@ import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from asr.transcriber import WhisperTranscriber
+from audio_processing.audio_quality import analyse_audio_quality
+from audio_processing.vad_utils import filter_speech_audio
+from config import settings
 from speaker.voice_verifier import VoiceVerifier, get_verifier
 from storage import database as db
+from validation.phrase_validation import validate_phrase
 from validation.text_validator import TextValidator
 
 logger = logging.getLogger(__name__)
@@ -122,6 +126,29 @@ async def signup(
     raw   = await audio.read()
     audio_arr = await _decode_audio(raw)
 
+    # Quality check (non-blocking — only warn, don't reject on quality failure)
+    if settings.ENABLE_NOISE_DETECTION:
+        quality = analyse_audio_quality(audio_arr, 16_000,
+            min_rms=settings.MIN_RMS_ENERGY,
+            snr_threshold_db=settings.SNR_THRESHOLD_DB)
+        logger.info("Signup quality: rms=%.4f snr=%.1fdB issues=%s",
+                    quality.rms_energy, quality.snr_db, quality.issues)
+        if "too_quiet" in quality.issues:
+            raise HTTPException(422, quality.feedback or "Audio too quiet — please speak louder.")
+        if "too_short" in quality.issues:
+            raise HTTPException(422, quality.feedback or "Recording too short.")
+
+    # VAD: extract speech-only audio for better enrollment
+    if settings.ENABLE_VAD:
+        try:
+            filtered, speech_ratio = filter_speech_audio(audio_arr, 16_000,
+                threshold=settings.VAD_THRESHOLD)
+            if len(filtered) >= int(16_000 * settings.MIN_SPEECH_DURATION_MS / 1000):
+                audio_arr = filtered
+                logger.info("VAD filtered: speech_ratio=%.2f", speech_ratio)
+        except Exception as vad_err:
+            logger.warning("VAD failed, using original audio: %s", vad_err)
+
     verifier    = get_verifier()
     transcriber = _get_transcriber()
 
@@ -177,6 +204,29 @@ async def login(
     raw       = await audio.read()
     audio_arr = await _decode_audio(raw)
 
+    # Quality check (non-blocking — only warn, don't reject on quality failure)
+    if settings.ENABLE_NOISE_DETECTION:
+        quality = analyse_audio_quality(audio_arr, 16_000,
+            min_rms=settings.MIN_RMS_ENERGY,
+            snr_threshold_db=settings.SNR_THRESHOLD_DB)
+        logger.info("Login quality: rms=%.4f snr=%.1fdB issues=%s",
+                    quality.rms_energy, quality.snr_db, quality.issues)
+        if "too_quiet" in quality.issues:
+            raise HTTPException(422, quality.feedback or "Audio too quiet — please speak louder.")
+        if "too_short" in quality.issues:
+            raise HTTPException(422, quality.feedback or "Recording too short.")
+
+    # VAD: extract speech-only audio for better enrollment
+    if settings.ENABLE_VAD:
+        try:
+            filtered, speech_ratio = filter_speech_audio(audio_arr, 16_000,
+                threshold=settings.VAD_THRESHOLD)
+            if len(filtered) >= int(16_000 * settings.MIN_SPEECH_DURATION_MS / 1000):
+                audio_arr = filtered
+                logger.info("VAD filtered: speech_ratio=%.2f", speech_ratio)
+        except Exception as vad_err:
+            logger.warning("VAD failed, using original audio: %s", vad_err)
+
     verifier    = get_verifier()
     transcriber = _get_transcriber()
     validator   = _get_validator()
@@ -192,6 +242,25 @@ async def login(
         phrase_score = phrase_val.similarity_score
     else:
         phrase_score = None
+
+    # Phrase validation (optional layer before embedding comparison)
+    if (settings.ENABLE_PHRASE_VALIDATION
+            and asr_result.is_reliable
+            and transcriber.engine == "whisper"):
+        phrase_passed, phrase_score, phrase_msg = validate_phrase(
+            asr_result.text,
+            user["passphrase_text"],
+            threshold=settings.PHRASE_SIMILARITY_THRESHOLD,
+        )
+        logger.info("Phrase validation: score=%.3f passed=%s", phrase_score, phrase_passed)
+        if not phrase_passed:
+            return {
+                "success": False,
+                "message": phrase_msg,
+                "voice_score": 0.0,
+                "phrase_score": round(phrase_score, 3),
+                "transcript": asr_result.text,
+            }
 
     transcript = asr_result.text if asr_result.is_reliable else "(unclear)"
 

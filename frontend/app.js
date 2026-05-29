@@ -68,20 +68,196 @@ function sbar(label, score, thr, dim = false) {
       <span class="score-pct">${pct}%</span></div>`;
 }
 
-// ── Recorder ──────────────────────────────────────────────────────────────────
-// Click once → records for up to 8 seconds → auto-stops → submits
+// ── Smart Recorder ────────────────────────────────────────────────────────────
+//
+// Progress bar advances ONLY during confirmed speech.
+// Silence / noise / phrase mismatch FREEZE progress and show why.
+// MediaRecorder captures everything (backend VAD filters it).
+// Falls back to time-based progress if AnalyserNode is unavailable.
 
-function makeRecorder({ prefix, onDone }) {
-    const btn   = $(`${prefix}-record-btn`);
-    const label = $(`${prefix}-btn-label`);
-    const hint  = $(`${prefix}-rec-hint`);
+const REC = {
+    TARGET_SPEECH_MS:   4500,   // valid speech needed to complete recording
+    MAX_SESSION_MS:    14_000,   // hard cap — stops even without enough speech
+    SPEECH_RMS:         0.012,  // RMS above this = active voice
+    NOISE_RMS:          0.004,  // RMS above this (below SPEECH) = background noise
+    ONSET_FRAMES:           4,  // consecutive speech frames before entering SPEECH state
+    PAUSE_SILENCE_MS:     700,  // silence duration before showing "no speech" message
+    PAUSE_NOISE_MS:       900,  // noise duration before showing noise warning
+    PHRASE_MIN_OVERLAP:   0.25, // fraction of phrase words needed for a match
+};
 
-    let mediaRec = null, stream = null, chunks = [], timer = null, active = false;
+// State → { message, css class }
+const REC_STATES = {
+    listening:        { msg: "Listening… speak your passphrase",                cls: "status-idle"       },
+    speech:           { msg: "Speech detected — keep speaking",                 cls: "status-good"       },
+    paused_silence:   { msg: "No speech detected — please start speaking",      cls: "status-warn"       },
+    paused_noise:     { msg: "Too much background noise — move somewhere quieter", cls: "status-warn"    },
+    paused_phrase:    { msg: "Please say the displayed passphrase",             cls: "status-warn"       },
+    processing:       { msg: "Processing voice authentication…",                cls: "status-processing" },
+};
+
+// Lenient phrase check used for the live-feedback warning only.
+// Returns true if transcript overlaps the phrase enough to count as "correct".
+function _phraseMatch(transcript, phrase) {
+    if (!transcript || !phrase) return true;   // no data → assume OK
+    const clean = s => s.toLowerCase().replace(/[^a-z\s]/g, "").split(/\s+/).filter(Boolean);
+    const tw = clean(transcript), pw = clean(phrase);
+    if (!tw.length) return true;
+    const ps   = new Set(pw);
+    const hits = tw.filter(w => ps.has(w)).length;
+    return hits / pw.length >= REC.PHRASE_MIN_OVERLAP;
+}
+
+function makeRecorder({ prefix, getPhrase = null, onDone }) {
+    const btn       = $(`${prefix}-record-btn`);
+    const label     = $(`${prefix}-btn-label`);
+    const hint      = $(`${prefix}-rec-hint`);
+    const statusEl  = $(`${prefix}-rec-status`);
+    const levelFill = $(`${prefix}-level-fill`);
+    const progWrap  = $(`${prefix}-prog-wrap`);
+    const progFill  = $(`${prefix}-prog-fill`);
+    const progLabel = $(`${prefix}-prog-label`);
+
+    let mediaRec = null, stream = null, chunks = [];
+    let timer = null, rafId = null, active = false;
+    let audioCtx = null, analyser = null;
+
+    // State machine
+    let recState    = "listening";
+    let validMs     = 0;        // accumulated valid-speech milliseconds
+    let silenceMs   = 0;        // consecutive silence duration
+    let noiseMs     = 0;        // consecutive noise duration
+    let onsetCount  = 0;        // consecutive speech frames (onset guard)
+    let smoothRMS   = 0;        // exponentially-smoothed RMS
+    let lastTs      = 0;        // previous RAF timestamp
+
+    // SpeechRecognition (phrase validation — informational only)
+    let srText      = "";
+    let srMatch     = true;     // optimistic: assume match until proven otherwise
+    let recog       = null;
+
+    const rmsArr    = new Float32Array(256);
+
+    // ── UI helpers ────────────────────────────────────────────────────────────
+
+    function setStatus(stateKey) {
+        const s = REC_STATES[stateKey] || REC_STATES.listening;
+        if (statusEl) { statusEl.textContent = s.msg; statusEl.className = `rec-status ${s.cls}`; }
+    }
+
+    function resetUI() {
+        if (levelFill) levelFill.style.width = "0%";
+        if (progFill)  progFill.style.width  = "0%";
+        if (progLabel) progLabel.textContent = `0 / ${(REC.TARGET_SPEECH_MS / 1000).toFixed(1)}s`;
+        if (progWrap)  progWrap.hidden = true;
+        if (statusEl)  { statusEl.textContent = ""; statusEl.className = "rec-status"; }
+    }
+
+    function getRMS() {
+        if (!analyser) return -1;   // -1 signals "analyser unavailable"
+        analyser.getFloatTimeDomainData(rmsArr);
+        let s = 0;
+        for (let i = 0; i < rmsArr.length; i++) s += rmsArr[i] * rmsArr[i];
+        return Math.sqrt(s / rmsArr.length);
+    }
+
+    // ── RAF loop ──────────────────────────────────────────────────────────────
+
+    function tick(ts) {
+        if (!active) return;
+
+        const dt  = lastTs ? Math.min(ts - lastTs, 80) : 0;   // cap delta to 80 ms
+        lastTs = ts;
+
+        const rawRMS = getRMS();
+
+        // ── Fallback: if analyser unavailable, use time-based progress ────────
+        if (rawRMS < 0) {
+            const elapsed = Date.now() - (ts - dt);
+            const pct = Math.min(100, (elapsed / REC.MAX_SESSION_MS) * 100);
+            if (progFill)  progFill.style.width  = `${pct}%`;
+            if (progLabel) progLabel.textContent = `${(elapsed / 1000).toFixed(1)}s`;
+            setStatus("listening");
+            rafId = requestAnimationFrame(tick);
+            return;
+        }
+
+        // Smooth the RMS to avoid jitter
+        smoothRMS = 0.25 * rawRMS + 0.75 * smoothRMS;
+
+        // ── Level meter ───────────────────────────────────────────────────────
+        if (levelFill)
+            levelFill.style.width = `${Math.min(100, (smoothRMS / 0.07) * 100)}%`;
+
+        // ── State machine ─────────────────────────────────────────────────────
+        const phrase = getPhrase ? getPhrase() : "";
+
+        if (smoothRMS >= REC.SPEECH_RMS) {
+            silenceMs = 0; noiseMs = 0;
+            onsetCount = Math.min(onsetCount + 1, REC.ONSET_FRAMES + 1);
+
+            if (onsetCount >= REC.ONSET_FRAMES) {
+                // Phrase mismatch check — only warn if SR has enough data AND clearly wrong
+                if (srText.length > 4 && !srMatch) {
+                    recState = "paused_phrase";
+                    // Don't advance validMs while phrase is wrong
+                } else {
+                    recState = "speech";
+                    validMs += dt;                  // ← ONLY valid speech advances progress
+                }
+            } else {
+                recState = "listening";             // onset guard: ignore brief pops
+            }
+
+        } else if (smoothRMS >= REC.NOISE_RMS) {
+            onsetCount = 0;
+            noiseMs   += dt;
+            silenceMs  = 0;
+
+            if (recState === "speech" || recState === "paused_phrase") {
+                // Brief dip — keep previous state briefly before switching
+                if (noiseMs > REC.PAUSE_NOISE_MS) recState = "paused_noise";
+            } else if (recState !== "paused_silence") {
+                if (noiseMs > REC.PAUSE_NOISE_MS) recState = "paused_noise";
+            }
+
+        } else {
+            // Silence
+            onsetCount = 0; noiseMs = 0;
+            silenceMs += dt;
+
+            if (recState === "speech" || recState === "paused_noise" || recState === "paused_phrase") {
+                if (silenceMs > REC.PAUSE_SILENCE_MS) recState = "paused_silence";
+            } else if (recState !== "paused_silence") {
+                if (silenceMs > REC.PAUSE_SILENCE_MS) recState = "paused_silence";
+                else recState = "listening";
+            }
+        }
+
+        // ── Update status message ─────────────────────────────────────────────
+        setStatus(recState);
+
+        // ── Progress bar (valid speech only) ─────────────────────────────────
+        const pct = Math.min(100, (validMs / REC.TARGET_SPEECH_MS) * 100);
+        if (progFill)  progFill.style.width  = `${pct}%`;
+        if (progLabel) progLabel.textContent =
+            `${(validMs / 1000).toFixed(1)} / ${(REC.TARGET_SPEECH_MS / 1000).toFixed(1)}s`;
+
+        // ── Auto-complete: enough valid speech collected ───────────────────────
+        if (validMs >= REC.TARGET_SPEECH_MS) { stop(); return; }
+
+        rafId = requestAnimationFrame(tick);
+    }
+
+    // ── Start ─────────────────────────────────────────────────────────────────
 
     async function start() {
         if (active) return;
-        chunks = [];
+        chunks = []; validMs = 0; silenceMs = 0; noiseMs = 0;
+        onsetCount = 0; smoothRMS = 0; lastTs = 0;
+        recState = "listening"; srText = ""; srMatch = true;
         $(`${prefix}-result`).hidden = true;
+        resetUI();
 
         try {
             stream = await navigator.mediaDevices.getUserMedia({
@@ -94,19 +270,58 @@ function makeRecorder({ prefix, onDone }) {
             return;
         }
 
+        // AnalyserNode — visualization only, never affects capture
+        try {
+            audioCtx = new AudioContext();
+            if (audioCtx.state === "suspended") await audioCtx.resume();
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+            analyser.smoothingTimeConstant = 0.2;
+            audioCtx.createMediaStreamSource(stream).connect(analyser);
+        } catch (_) { analyser = null; }   // graceful fallback to time-based progress
+
+        // SpeechRecognition — phrase matching feedback only, never blocks capture
+        const SRC = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SRC && getPhrase) {
+            try {
+                recog = new SRC();
+                recog.continuous = true; recog.interimResults = true; recog.lang = "en-US";
+                recog.onresult = ev => {
+                    let tx = "";
+                    for (let i = ev.resultIndex; i < ev.results.length; i++)
+                        tx += ev.results[i][0].transcript + " ";
+                    srText  = tx.trim();
+                    srMatch = _phraseMatch(srText, getPhrase());
+                };
+                recog.onend   = () => { if (active) try { recog.start(); } catch(_){} };
+                recog.onerror = () => {};
+                recog.start();
+            } catch(_) { recog = null; }
+        }
+
+        // MediaRecorder — captures everything for server-side processing
         const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
             ? "audio/webm;codecs=opus" : "audio/webm";
         mediaRec = new MediaRecorder(stream, { mimeType: mime });
         mediaRec.ondataavailable = e => { if (e.data?.size > 0) chunks.push(e.data); };
         mediaRec.onstop = async () => {
+            cancelAnimationFrame(rafId);
+            try { recog?.stop(); } catch(_) {}
+            audioCtx?.close().catch(() => {});
+            audioCtx = null; analyser = null; recog = null;
+
             btn.classList.remove("recording");
             if (label) label.textContent = "Start";
-            if (hint)  hint.textContent  = "Verifying…";
+            resetUI();
+            if (hint) hint.textContent = "Verifying…";
+            setStatus("processing");
+
             try {
                 const wav = await blobToWav(new Blob(chunks, { type: mime }));
                 onDone(wav);
             } catch (err) {
                 console.error(err);
+                if (statusEl) { statusEl.textContent = ""; statusEl.className = "rec-status"; }
                 if (hint) hint.textContent = "Audio error — please try again";
             }
         };
@@ -115,22 +330,22 @@ function makeRecorder({ prefix, onDone }) {
         active = true;
         btn.classList.add("recording");
         if (label) label.textContent = "Recording…";
+        if (progWrap) progWrap.hidden = false;
+        setStatus("listening");
 
-        // Live timer display
-        const startTime = Date.now();
-        const timerInterval = setInterval(() => {
-            const secs = ((Date.now() - startTime) / 1000).toFixed(1);
-            if (hint) hint.textContent = `Recording… ${secs}s captured`;
-        }, 100);
+        // Hard-cap fallback: stop after MAX_SESSION_MS regardless
+        timer = setTimeout(stop, REC.MAX_SESSION_MS);
 
-        // Auto-stop after 8 seconds
-        timer = setTimeout(() => { clearInterval(timerInterval); stop(); }, 8000);
+        rafId = requestAnimationFrame(tick);
     }
+
+    // ── Stop ──────────────────────────────────────────────────────────────────
 
     function stop() {
         if (!active) return;
         active = false;
         clearTimeout(timer);
+        cancelAnimationFrame(rafId);
         stream?.getTracks().forEach(t => t.stop());
         if (mediaRec?.state !== "inactive") mediaRec.stop();
     }
@@ -168,7 +383,8 @@ async function loadPassphraseHint(username) {
     });
 
     makeRecorder({
-        prefix: "login",
+        prefix:    "login",
+        getPhrase: () => $("login-hint-text")?.textContent?.trim() || "",
         async onDone(wav) {
             const form = new FormData();
             form.append("username", $("login-username").value.trim());
@@ -218,7 +434,8 @@ async function loadPassphraseHint(username) {
     [nameInp, userInp].forEach(el => el.addEventListener("input", updateReady));
 
     makeRecorder({
-        prefix: "signup",
+        prefix:    "signup",
+        getPhrase: () => phraseInp.value.trim(),
         async onDone(wav) {
             const form = new FormData();
             form.append("username",     userInp.value.trim());

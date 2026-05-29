@@ -39,7 +39,21 @@
                 <span class="btn-icon">🎤</span>
                 <span class="btn-label" id="login-btn-label">Start</span>
             </button>
-            <p class="rec-hint" id="login-rec-hint">Enter your username above</p>
+
+            <!-- Audio level meter -->
+            <div class="level-wrap">
+                <div class="level-track"><div id="login-level-fill" class="level-fill"></div></div>
+            </div>
+
+            <!-- Progress bar (0 → 8 s) -->
+            <div class="prog-wrap" id="login-prog-wrap" hidden>
+                <div class="prog-track"><div id="login-prog-fill" class="prog-fill"></div></div>
+                <span id="login-prog-label" class="prog-label">0 / 8s</span>
+            </div>
+
+            <!-- Status message -->
+            <p class="rec-status" id="login-rec-status"></p>
+            <p class="rec-hint"   id="login-rec-hint">Enter your username above</p>
         </div>
 
         <div id="login-result" class="result-card" hidden></div>
@@ -73,7 +87,21 @@
                 <span class="btn-icon">🎤</span>
                 <span class="btn-label" id="signup-btn-label">Start</span>
             </button>
-            <p class="rec-hint" id="signup-rec-hint">Fill in the fields above</p>
+
+            <!-- Audio level meter -->
+            <div class="level-wrap">
+                <div class="level-track"><div id="signup-level-fill" class="level-fill"></div></div>
+            </div>
+
+            <!-- Progress bar (0 → 8 s) -->
+            <div class="prog-wrap" id="signup-prog-wrap" hidden>
+                <div class="prog-track"><div id="signup-prog-fill" class="prog-fill"></div></div>
+                <span id="signup-prog-label" class="prog-label">0 / 8s</span>
+            </div>
+
+            <!-- Status message -->
+            <p class="rec-status" id="signup-rec-status"></p>
+            <p class="rec-hint"   id="signup-rec-hint">Fill in the fields above</p>
         </div>
 
         <div id="signup-result" class="result-card" hidden></div>
