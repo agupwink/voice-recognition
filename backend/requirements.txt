@@ -1,0 +1,24 @@
+# ── Core (required) ──────────────────────────────────────────────────────────
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+numpy>=1.24.0
+scipy>=1.11.0
+
+# ── Text metrics (strongly recommended, pure Python) ─────────────────────────
+jiwer>=3.0.0          # Word Error Rate
+jellyfish>=1.0.1      # Phonetic matching (Soundex)
+
+# ── ASR — Whisper (optional, large download ~1 GB with torch) ────────────────
+# Install with:  pip install openai-whisper
+# Requires:      pip install torch torchaudio
+# Without this the system runs with a mock ASR and still exercises the full
+# audio pipeline, VAD, noise detection, and validation layers.
+#
+# openai-whisper>=20231117
+# torch>=2.1.0
+# torchaudio>=2.1.0
+
+# ── Silero VAD (optional, needs torch above) ─────────────────────────────────
+# Automatically fetched via torch.hub when torch is installed.
+# No extra package needed.

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+    <title>Voice Auth</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com"/>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"/>
+    <link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<div class="page">
+
+    <header class="site-header">
+        <div class="logo">🎙 VoiceAuth</div>
+        <p class="tagline">Your voice is your password</p>
+    </header>
+
+    <div class="tab-bar">
+        <button class="tab active" data-tab="login">Log In</button>
+        <button class="tab"        data-tab="signup">Sign Up</button>
+    </div>
+
+    <!-- ═══════ LOGIN ═══════ -->
+    <div class="panel" id="panel-login">
+
+        <div class="field-group">
+            <label for="login-username">Username</label>
+            <input id="login-username" type="text" placeholder="your username" autocomplete="username"/>
+        </div>
+
+        <div id="login-hint-box" class="hint-box" hidden>
+            <span class="hint-label">Say this phrase:</span>
+            <span id="login-hint-text" class="hint-phrase"></span>
+        </div>
+
+        <div class="record-area">
+            <button id="login-record-btn" class="record-btn" disabled>
+                <span class="btn-icon">🎤</span>
+                <span class="btn-label" id="login-btn-label">Start</span>
+            </button>
+            <p class="rec-hint" id="login-rec-hint">Enter your username above</p>
+        </div>
+
+        <div id="login-result" class="result-card" hidden></div>
+    </div>
+
+    <!-- ═══════ SIGNUP ═══════ -->
+    <div class="panel hidden" id="panel-signup">
+
+        <div class="field-group">
+            <label for="signup-name">Full name</label>
+            <input id="signup-name" type="text" placeholder="Ada Lovelace"/>
+        </div>
+        <div class="field-group">
+            <label for="signup-username">Username</label>
+            <input id="signup-username" type="text" placeholder="ada" autocomplete="username"/>
+        </div>
+        <div class="field-group">
+            <label for="signup-passphrase">Voice passphrase
+                <span class="field-hint">— you will speak this every time you log in</span>
+            </label>
+            <input id="signup-passphrase" type="text" placeholder="e.g. My voice is my password verify me"/>
+        </div>
+
+        <div id="signup-phrase-display" class="hint-box" hidden>
+            <span class="hint-label">Now say this out loud:</span>
+            <span id="signup-phrase-text" class="hint-phrase"></span>
+        </div>
+
+        <div class="record-area">
+            <button id="signup-record-btn" class="record-btn" disabled>
+                <span class="btn-icon">🎤</span>
+                <span class="btn-label" id="signup-btn-label">Start</span>
+            </button>
+            <p class="rec-hint" id="signup-rec-hint">Fill in the fields above</p>
+        </div>
+
+        <div id="signup-result" class="result-card" hidden></div>
+    </div>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>
